@@ -1,0 +1,72 @@
+spring:
+  application:
+    name: swiftship-tracking
+
+  datasource:
+    url: jdbc:postgresql://localhost:5432/swiftship
+    username: ${DB_USER:postgres}
+    password: ${DB_PASS:admin}
+    driver-class-name: org.postgresql.Driver
+
+  jpa:
+    hibernate:
+      ddl-auto: validate
+    show-sql: false
+    properties:
+      hibernate:
+        dialect: org.hibernate.dialect.PostgreSQLDialect
+        format_sql: true
+
+  flyway:
+    enabled: true
+#    clean-disabled: false
+    locations: classpath:db/migration
+
+  kafka:
+    bootstrap-servers: ${KAFKA_BROKERS:localhost:9092}
+    producer:
+      key-serializer: org.apache.kafka.common.serialization.StringSerializer
+      value-serializer: org.springframework.kafka.support.serializer.JsonSerializer
+      properties:
+        spring.json.add.type.headers: false
+    consumer:
+      group-id: swiftship-service
+      auto-offset-reset: earliest
+      key-deserializer: org.apache.kafka.common.serialization.StringDeserializer
+      value-deserializer: org.springframework.kafka.support.serializer.JsonDeserializer
+
+
+server:
+  port: 8080
+  servlet:
+    context-path: /api/v1
+
+swiftship:
+  kafka:
+    topics:
+      shipment-events: shipment.events
+  business:
+    max-active-shipments-per-carrier: 20
+    return-window-days: 14
+    delay-threshold-hours: 48
+
+springdoc:
+  api-docs:
+    path: /api-docs
+  swagger-ui:
+    path: /swagger-ui.html
+    operationsSorter: method
+
+management:
+  endpoints:
+    web:
+      exposure:
+        include: health,info,metrics
+  endpoint:
+    health:
+      show-details: always
+
+logging:
+  level:
+    com.swiftship: DEBUG
+    org.springframework.kafka: INFO

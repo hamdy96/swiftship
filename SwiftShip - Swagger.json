@@ -1,0 +1,708 @@
+{
+  "openapi": "3.0.1",
+  "info": {
+    "title": "SwiftShip — Shipment Tracking API",
+    "description": "REST API for managing shipment lifecycle in the SwiftShip logistics platform.\n\n**Lifecycle:**\n`CREATED → PICKED_UP → IN_TRANSIT → OUT_FOR_DELIVERY → DELIVERED`\n- `CANCELLED` is allowed from CREATED or PICKED_UP only\n- `RETURNED` is allowed from DELIVERED within 14 days only\n- `DELAYED` is a computed flag (not a lifecycle status) —\n  true when the shipment is not delivered and \u003E48h past estimated date\n\n**Event-Driven:** Every status change publishes a `SHIPMENT_STATUS_CHANGED`\nevent to Kafka via the Transactional Outbox pattern, ensuring\nno events are lost even if Kafka is temporarily unavailable.\n",
+    "version": "1.0.0"
+  },
+  "servers": [
+    {
+      "url": "http://localhost:8080/api/v1",
+      "description": "Local Development"
+    },
+    {
+      "url": "https://api.swiftship.com/api/v1",
+      "description": "Production"
+    }
+  ],
+  "tags": [
+    {
+      "name": "Shipments",
+      "description": "Shipment lifecycle management API"
+    }
+  ],
+  "paths": {
+    "/shipments": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "List all shipments (paginated)",
+        "description": "Optionally filter by ?status=IN_TRANSIT. Supports ?page, ?size, ?sort.",
+        "operationId": "listShipments",
+        "parameters": [
+          {
+            "name": "status",
+            "in": "query",
+            "required": false,
+            "schema": {
+              "type": "string",
+              "enum": [
+                "CREATED",
+                "PICKED_UP",
+                "IN_TRANSIT",
+                "OUT_FOR_DELIVERY",
+                "DELIVERED",
+                "CANCELLED",
+                "RETURNED"
+              ]
+            }
+          },
+          {
+            "name": "pageable",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Pageable"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      },
+      "post": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Create a new shipment",
+        "description": "Creates a shipment in CREATED status and assigns it to a carrier. Carrier must not exceed 20 active shipments. A SHIPMENT_STATUS_CHANGED event is published to Kafka via the outbox.",
+        "operationId": "createShipment",
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/CreateShipmentRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "201": {
+            "description": "Shipment created successfully",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          },
+          "400": {
+            "description": "Validation error — check the 'details' field",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          },
+          "409": {
+            "description": "Carrier has reached max active shipment capacity",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/{id}/status": {
+      "patch": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Transition shipment status",
+        "description": "Moves a shipment to the next valid status per the lifecycle FSM. RETURNED is only allowed within 14 days of delivery.",
+        "operationId": "updateStatus",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "requestBody": {
+          "content": {
+            "application/json": {
+              "schema": {
+                "$ref": "#/components/schemas/UpdateShipmentStatusRequest"
+              }
+            }
+          },
+          "required": true
+        },
+        "responses": {
+          "422": {
+            "description": "Invalid transition or return window expired",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Status updated",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/{id}/carrier": {
+      "patch": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Assign or re-assign a carrier to a shipment",
+        "operationId": "assignCarrier",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "carrierId",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "409": {
+            "description": "Carrier is at maximum capacity",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Carrier assigned",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/{id}": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Get shipment by internal ID",
+        "operationId": "getById",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "404": {
+            "description": "Shipment not found",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          },
+          "200": {
+            "description": "Shipment found",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/{id}/history": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Get status transition history for a shipment",
+        "operationId": "getHistory",
+        "parameters": [
+          {
+            "name": "id",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/StatusHistoryResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/track/{trackingNumber}": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "Track a shipment by tracking number",
+        "description": "Public endpoint. Returns current status and the computed 'delayed' flag.",
+        "operationId": "trackByNumber",
+        "parameters": [
+          {
+            "name": "trackingNumber",
+            "in": "path",
+            "description": "Tracking number e.g. SWF-1714978432000-A3B2C1",
+            "required": true,
+            "schema": {
+              "type": "string"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/ShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/delayed": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "List DELAYED shipments",
+        "description": "Returns active shipments whose estimatedDeliveryDate is \u003E48h in the past.",
+        "operationId": "listDelayed",
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "type": "array",
+                  "items": {
+                    "$ref": "#/components/schemas/ShipmentResponse"
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+    },
+    "/shipments/carrier/{carrierId}": {
+      "get": {
+        "tags": [
+          "Shipments"
+        ],
+        "summary": "List shipments by carrier",
+        "operationId": "listByCarrier",
+        "parameters": [
+          {
+            "name": "carrierId",
+            "in": "path",
+            "required": true,
+            "schema": {
+              "type": "string",
+              "format": "uuid"
+            }
+          },
+          {
+            "name": "pageable",
+            "in": "query",
+            "required": true,
+            "schema": {
+              "$ref": "#/components/schemas/Pageable"
+            }
+          }
+        ],
+        "responses": {
+          "200": {
+            "description": "OK",
+            "content": {
+              "*/*": {
+                "schema": {
+                  "$ref": "#/components/schemas/PageShipmentResponse"
+                }
+              }
+            }
+          }
+        }
+      }
+    }
+  },
+  "components": {
+    "schemas": {
+      "CreateShipmentRequest": {
+        "required": [
+          "carrierId",
+          "customerEmail",
+          "customerName",
+          "destinationAddress",
+          "originAddress"
+        ],
+        "type": "object",
+        "properties": {
+          "customerName": {
+            "type": "string"
+          },
+          "customerEmail": {
+            "type": "string"
+          },
+          "originAddress": {
+            "type": "string"
+          },
+          "destinationAddress": {
+            "type": "string"
+          },
+          "originWarehouseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destinationWarehouseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "carrierId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "weightKg": {
+            "minimum": 0.001,
+            "exclusiveMinimum": false,
+            "type": "number"
+          },
+          "estimatedDeliveryDate": {
+            "type": "string",
+            "format": "date"
+          }
+        }
+      },
+      "ShipmentResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "trackingNumber": {
+            "type": "string"
+          },
+          "customerName": {
+            "type": "string"
+          },
+          "customerEmail": {
+            "type": "string"
+          },
+          "originAddress": {
+            "type": "string"
+          },
+          "destinationAddress": {
+            "type": "string"
+          },
+          "originWarehouseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "originWarehouseName": {
+            "type": "string"
+          },
+          "destinationWarehouseId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "destinationWarehouseName": {
+            "type": "string"
+          },
+          "carrierId": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "carrierName": {
+            "type": "string"
+          },
+          "status": {
+            "type": "string",
+            "enum": [
+              "CREATED",
+              "PICKED_UP",
+              "IN_TRANSIT",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED",
+              "CANCELLED",
+              "RETURNED"
+            ]
+          },
+          "delayed": {
+            "type": "boolean"
+          },
+          "weightKg": {
+            "type": "number"
+          },
+          "estimatedDeliveryDate": {
+            "type": "string",
+            "format": "date"
+          },
+          "deliveredAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "createdAt": {
+            "type": "string",
+            "format": "date-time"
+          },
+          "updatedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      },
+      "UpdateShipmentStatusRequest": {
+        "required": [
+          "status"
+        ],
+        "type": "object",
+        "properties": {
+          "status": {
+            "type": "string",
+            "enum": [
+              "CREATED",
+              "PICKED_UP",
+              "IN_TRANSIT",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED",
+              "CANCELLED",
+              "RETURNED"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          },
+          "changedBy": {
+            "type": "string"
+          }
+        }
+      },
+      "Pageable": {
+        "type": "object",
+        "properties": {
+          "page": {
+            "minimum": 0,
+            "type": "integer",
+            "format": "int32"
+          },
+          "size": {
+            "minimum": 1,
+            "type": "integer",
+            "format": "int32"
+          },
+          "sort": {
+            "type": "array",
+            "items": {
+              "type": "string"
+            }
+          }
+        }
+      },
+      "PageShipmentResponse": {
+        "type": "object",
+        "properties": {
+          "totalElements": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "totalPages": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "first": {
+            "type": "boolean"
+          },
+          "last": {
+            "type": "boolean"
+          },
+          "numberOfElements": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "size": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "content": {
+            "type": "array",
+            "items": {
+              "$ref": "#/components/schemas/ShipmentResponse"
+            }
+          },
+          "number": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "sort": {
+            "$ref": "#/components/schemas/SortObject"
+          },
+          "pageable": {
+            "$ref": "#/components/schemas/PageableObject"
+          },
+          "empty": {
+            "type": "boolean"
+          }
+        }
+      },
+      "PageableObject": {
+        "type": "object",
+        "properties": {
+          "offset": {
+            "type": "integer",
+            "format": "int64"
+          },
+          "sort": {
+            "$ref": "#/components/schemas/SortObject"
+          },
+          "pageNumber": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "pageSize": {
+            "type": "integer",
+            "format": "int32"
+          },
+          "unpaged": {
+            "type": "boolean"
+          },
+          "paged": {
+            "type": "boolean"
+          }
+        }
+      },
+      "SortObject": {
+        "type": "object",
+        "properties": {
+          "empty": {
+            "type": "boolean"
+          },
+          "sorted": {
+            "type": "boolean"
+          },
+          "unsorted": {
+            "type": "boolean"
+          }
+        }
+      },
+      "StatusHistoryResponse": {
+        "type": "object",
+        "properties": {
+          "id": {
+            "type": "string",
+            "format": "uuid"
+          },
+          "fromStatus": {
+            "type": "string",
+            "enum": [
+              "CREATED",
+              "PICKED_UP",
+              "IN_TRANSIT",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED",
+              "CANCELLED",
+              "RETURNED"
+            ]
+          },
+          "toStatus": {
+            "type": "string",
+            "enum": [
+              "CREATED",
+              "PICKED_UP",
+              "IN_TRANSIT",
+              "OUT_FOR_DELIVERY",
+              "DELIVERED",
+              "CANCELLED",
+              "RETURNED"
+            ]
+          },
+          "notes": {
+            "type": "string"
+          },
+          "changedBy": {
+            "type": "string"
+          },
+          "changedAt": {
+            "type": "string",
+            "format": "date-time"
+          }
+        }
+      }
+    }
+  }
+}
